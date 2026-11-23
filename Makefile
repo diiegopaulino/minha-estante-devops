@@ -1,4 +1,8 @@
-.PHONY: install lint test build clean
+.PHONY: install lint test build clean docker-build docker-run docker-stop docker-logs smoke
+
+IMAGE ?= ghcr.io/diiegopaulino/minha-estante-api
+TAG   ?= latest
+URL   ?= http://localhost:5000
 
 install:
 	pip install -r requirements-dev.txt
@@ -15,3 +19,19 @@ build:
 
 clean:
 	rm -rf dist coverage.xml .pytest_cache .coverage
+
+# ---- Docker ----
+docker-build:
+	docker build -t $(IMAGE):$(TAG) .
+
+docker-run:
+	docker compose up -d --build
+
+docker-stop:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
+
+smoke:
+	bash scripts/smoke_test.sh $(URL)
