@@ -13,3 +13,6 @@ dist/
 terraform.tfvars
 .terraform.lock.hcl
 crash.log
+
+# Deploy (estado local do scripts/deploy.sh)
+.current_tag
