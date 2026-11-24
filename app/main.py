@@ -1,4 +1,6 @@
 """Minha Estante API — API REST simples para controle de livros lidos/a ler."""
+import os
+
 from flask import Flask, jsonify, request
 
 STATUS_VALIDOS = {"quero-ler", "lendo", "lido"}
@@ -11,7 +13,8 @@ def create_app():
 
     @app.get("/health")
     def health():
-        return jsonify(status="ok"), 200
+        # APP_VERSION é o SHA do commit, gravado na imagem Docker pelo pipeline.
+        return jsonify(status="ok", versao=os.environ.get("APP_VERSION", "dev")[:7]), 200
 
     @app.get("/livros")
     def listar():
