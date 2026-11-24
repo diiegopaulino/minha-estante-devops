@@ -18,7 +18,13 @@ def criar_livro(client, **extra):
 def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.get_json() == {"status": "ok"}
+    assert resp.get_json() == {"status": "ok", "versao": "dev"}
+
+
+def test_health_mostra_versao_do_commit(client, monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "3f2a9c1d8e7b6a5f")
+    resp = client.get("/health")
+    assert resp.get_json()["versao"] == "3f2a9c1"
 
 
 def test_criar_livro(client):
