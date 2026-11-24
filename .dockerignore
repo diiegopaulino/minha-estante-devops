@@ -1,0 +1,22 @@
+# Mantém a imagem pequena: só entram app/ e requirements.txt
+.git
+.github
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.coverage
+coverage.xml
+dist
+tests
+infra
+scripts
+docs
+Makefile
+pytest.ini
+requirements-dev.txt
+*.md
+docker-compose*.yml
+Dockerfile
+.dockerignore

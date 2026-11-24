@@ -1,0 +1,47 @@
+# Orquestração da Minha Estante API com Docker Compose.
+#
+# Uso local (constrói a imagem a partir do código):
+#   docker compose up -d --build
+#
+# Uso no servidor (scripts/deploy.sh): baixa do GHCR a imagem da versão indicada
+#   IMAGE_TAG=<sha-do-commit> docker compose pull && docker compose up -d --no-build
+#
+# Variáveis (opcionais, podem vir de um arquivo .env ao lado deste):
+#   IMAGE_NAME  repositório da imagem   (padrão: ghcr.io/diiegopaulino/minha-estante-api)
+#   IMAGE_TAG   versão da imagem        (padrão: latest)
+#   APP_PORT    porta publicada no host (padrão: 5000)
+
+services:
+  api:
+    image: ${IMAGE_NAME:-ghcr.io/diiegopaulino/minha-estante-api}:${IMAGE_TAG:-latest}
+    build: .
+    container_name: minha-estante-api
+    ports:
+      - "${APP_PORT:-5000}:5000"
+    # Reinicia sozinho se o processo cair ou o servidor reiniciar.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).status == 200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    # Endurecimento: sistema de arquivos somente leitura (só /tmp é gravável)
+    # e o processo não pode ganhar privilégios novos.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    # Limite de recursos: a EC2 t3.micro tem 1 GB de RAM.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.50"
+    # Rotação de logs: no máximo 3 arquivos de 10 MB (consultar com `docker logs`).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

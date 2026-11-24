@@ -1,0 +1,205 @@
+# Pipeline CI/CD da Minha Estante API.
+#
+# Pull request na main -> só CI: lint, testes, validação do Terraform, build e scan da imagem.
+# Push na main         -> CI + publicação da imagem no GHCR + deploy na EC2 (com aprovação manual).
+#
+# Configuração necessária no GitHub (ver README, seção "Entrega contínua"):
+#   Secrets:     EC2_HOST, EC2_USER, EC2_SSH_KEY
+#   Environment: production, com "Required reviewers"
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Um novo push na mesma branch cancela a execução anterior (exceto o deploy, ver abaixo).
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAME: ghcr.io/diiegopaulino/minha-estante-api
+
+jobs:
+  # ---------------------------------------------------------------- CI
+  lint:
+    name: Lint (flake8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: make install
+      - run: make lint
+
+  test:
+    name: Testes (pytest)
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: make install
+      - run: make test
+      - name: Publicar relatório de cobertura
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  terraform:
+    name: Validar Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+
+  # ---------------------------------------------------------------- Build, scan e publicação
+  image:
+    name: Build, scan e push da imagem
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Constrói a imagem e carrega no Docker local do runner (ainda sem publicar).
+      - name: Build da imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          build-args: APP_VERSION=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Scan de vulnerabilidades: qualquer CRITICAL com correção disponível interrompe o pipeline.
+      - name: Scan de segurança (Trivy)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.56.2 image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+            "${IMAGE_NAME}:${GITHUB_SHA}"
+
+      # Teste rápido do container: a imagem precisa subir e responder /health.
+      - name: Teste do container
+        run: |
+          docker run -d --name teste -p 5000:5000 "${IMAGE_NAME}:${GITHUB_SHA}"
+          bash scripts/smoke_test.sh http://localhost:5000
+          docker rm -f teste
+
+      # A publicação no GHCR só acontece na main (em PR a imagem é descartada).
+      - name: Login no GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push para o GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          docker push "${IMAGE_NAME}:${GITHUB_SHA}"
+          docker push "${IMAGE_NAME}:latest"
+
+  # ---------------------------------------------------------------- CD
+  deploy:
+    name: Deploy em produção (EC2)
+    runs-on: ubuntu-latest
+    needs: [image, terraform]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # O environment "production" exige aprovação manual (Continuous Delivery).
+    environment:
+      name: production
+      url: ${{ steps.vars.outputs.app_url }}
+    # Nunca dois deploys ao mesmo tempo; um novo espera o anterior terminar.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      APP_DIR: /opt/minha-estante
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sem os secrets configurados, o deploy é pulado (com aviso) em vez de falhar.
+      - name: Verificar configuração
+        id: vars
+        run: |
+          if [[ -z "$EC2_HOST" || -z "$EC2_USER" || -z "$EC2_SSH_KEY" ]]; then
+            echo "::warning::Secrets EC2_HOST, EC2_USER e EC2_SSH_KEY não configurados. Deploy pulado."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "app_url=http://${EC2_HOST}:5000" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preparar chave SSH
+        if: steps.vars.outputs.configured == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -T 15 -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Copiar compose e script para a EC2
+        if: steps.vars.outputs.configured == 'true'
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" "mkdir -p $APP_DIR/scripts"
+          scp -i ~/.ssh/ec2.pem docker-compose.yml "$EC2_USER@$EC2_HOST:$APP_DIR/"
+          scp -i ~/.ssh/ec2.pem scripts/deploy.sh "$EC2_USER@$EC2_HOST:$APP_DIR/scripts/"
+
+      # Login temporário no GHCR (o token vale só durante este job), deploy e logout.
+      - name: Executar deploy.sh na EC2
+        if: steps.vars.outputs.configured == 'true'
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" \
+            "docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null \
+             && { bash $APP_DIR/scripts/deploy.sh '${GITHUB_SHA}'; rc=\$?; docker logout ghcr.io >/dev/null; exit \$rc; }" \
+            <<< "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Smoke test na URL pública
+        if: steps.vars.outputs.configured == 'true'
+        run: bash scripts/smoke_test.sh "${{ steps.vars.outputs.app_url }}"
+
+      - name: Remover chave SSH
+        if: always()
+        run: rm -f ~/.ssh/ec2.pem

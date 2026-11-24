@@ -1,0 +1,4 @@
+# Scripts e arquivos usados no Linux (EC2/runners) sempre com LF
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
